@@ -506,3 +506,181 @@ def cc(r,eta):
         return 0
     else:
         return c0(eta)+c1(eta)*r +c3(eta)*r**3
+
+# functions to calcualte structure factor of two-yukawa system 
+# This function depends on the function 'TY_ReduceNonlinearSystem', 
+# whose source code comes from Biehl, R. (2019). Jscatter, 
+# a program for evaluation and analysis of experimental data. 
+# PLoS One, 14(6), e0218789.
+def twoYukawa(qd, phi, K1, K2, scl1, scl2):
+    """
+    Parameters
+    ----------
+    qd : 1D numpy array (dimensionless)
+        Dimensionless qd = q * d (d is the particle diameter).
+    phi : float (dimensionless)
+        Volume fraction.
+    K1, K2 : float (dimensionless)
+        Yukawa strength, normalized by kT (dimensionless).
+    scl1, scl2 : float (dimensionless)
+        Screening length (dimensionless length in units of particle diameter d), scl = 1/Z.
+
+    Returns
+    -------
+    Sq : 1D numpy array
+        Structure factor S(qd).
+    """
+
+    # —— Convert objects that may have "quantity value interface" to dimensionless float (no pint dependency) ——
+    def _dimless(x):
+        
+        if isinstance(x, (int, float, np.floating)):
+            return float(x)
+        
+        mag = getattr(x, "magnitude", None)
+        if mag is not None:
+            return float(mag)
+       
+        try:
+            return float(x)
+        except Exception as e:
+            raise TypeError(
+                f"Expected a dimensionless float-like value, got {type(x)}"
+            ) from e
+
+    qd = np.asarray(qd, float)
+    phi  = _dimless(phi)
+    K1   = _dimless(K1)
+    K2   = _dimless(K2)
+    scl1 = _dimless(scl1)
+    scl2 = _dimless(scl2)
+
+    if abs(K1)  < 1e-3:  K1  = 1e-3
+    if abs(K2)  < 1e-3:  K2  = 1e-3
+    if abs(scl1) < 1e-12: scl1 = 1e-12
+    if abs(scl2) < 1e-12: scl2 = 1e-12
+
+    # Z = 1 / scl (dimensionless; qd already dimensionless, use directly)
+    Z1 = 1.0 / scl1
+    Z2 = 1.0 / scl2
+    if abs(Z1) < 1e-3: Z1 = 1e-3
+    if abs(Z2) < 1e-3: Z2 = 1e-3
+
+    # Prevent Z1 == Z2 degeneration; also ensure Z1 > Z2 (same as original logic)
+    if Z1 == Z2:
+        Z1 *= 2.0
+        K2 = (K1 + K2)
+        K1 = 1e-3 * K2
+    if Z1 < Z2:
+        Z1, Z2 = Z2, Z1
+        K1, K2 = K2, K1
+
+    # ---- Only dependent on TY_ReduceNonlinearSystem, build coefficients ----
+    import AsherFolder.Solve_eqs as TYmod
+
+    class _State:
+        
+        def __init__(self):
+            
+            self.w = np.zeros(23, dtype=float)
+
+    TYmod.TY = _State()
+    TYmod.TY_ReduceNonlinearSystem(Z1, Z2, K1, K2, phi)  # Only this step depends on external code
+    TY = TYmod.TY  # Local alias
+
+    def _capQ(d2: float) -> float:
+        return d2 * TY.B32 + (d2**3) * TY.B34
+
+    def _V(d2: float) -> float:
+        return -(
+            (d2**2)  * TY.G13  + (d2**3)  * TY.G14  + (d2**4)  * TY.G15  + (d2**5)  * TY.G16 +
+            (d2**6)  * TY.G17  + (d2**7)  * TY.G18  + (d2**8)  * TY.G19  + (d2**9)  * TY.G110 +
+            (d2**10) * TY.G111 + (d2**11) * TY.G112 + (d2**12) * TY.G113
+        )
+
+    def _capW(d2: float) -> float:
+        s = 0.0
+        s += d2      * TY.G22
+        s += d2**2   * TY.G23
+        s += d2**3   * TY.G24
+        s += d2**4   * TY.G25
+        s += d2**5   * TY.G26
+        s += d2**6   * TY.G27
+        s += d2**7   * TY.G28
+        s += d2**8   * TY.G29
+        s += d2**9   * TY.G210
+        s += d2**10  * TY.G211
+        s += d2**11  * TY.G212
+        s += d2**12  * TY.G213
+        s += d2**13  * TY.G214
+        return s
+
+    def _X(d2: float) -> float:
+        # d1 = V/W
+        return _V(d2) / _capW(d2)
+
+    def _solve_linear(d1: float, d2: float):
+        # Cramer's rule back-substitution (a, b, c1, c2)
+        det    = TY.q22 * d1 * d2
+        det_a  = TY.qa12 * d2 + TY.qa21 * d1 + TY.qa22 * d1 * d2 + TY.qa23 * d1 * (d2**2) + TY.qa32 * (d1**2) * d2
+        det_b  = TY.qb12 * d2 + TY.qb21 * d1 + TY.qb22 * d1 * d2 + TY.qb23 * d1 * (d2**2) + TY.qb32 * (d1**2) * d2
+        det_c1 = TY.qc112 * d2 + TY.qc121 * d1 + TY.qc122 * d1 * d2 + TY.qc123 * d1 * (d2**2) + TY.qc132 * (d1**2) * d2
+        det_c2 = TY.qc212 * d2 + TY.qc221 * d1 + TY.qc222 * d1 * d2 + TY.qc223 * d1 * (d2**2) + TY.qc232 * (d1**2) * d2
+        a  = det_a  / det
+        b  = det_b  / det
+        c1 = det_c1 / det
+        c2 = det_c2 / det
+        return a, b, c1, c2
+
+
+    # ---- Polynomial root-finding & root selection ----
+    w = TY.w[::-1]  # numpy.roots requires from highest order to constant term
+    roots = np.roots(w[np.isfinite(w)])
+
+    candidates = []
+    for r in roots:
+        if abs(np.imag(r)) > 1e-12:
+            continue
+        d2 = float(np.real(r))
+        if _capW(d2) == 0 or _capQ(d2) == 0:
+            continue
+        d1 = _X(d2)
+        try:
+            a, b, c1, c2 = _solve_linear(d1, d2)
+            g1 = _ghat(Z1, a, b, c1, c2, d1, d2)
+            g2 = _ghat(Z2, a, b, c1, c2, d1, d2)
+        except Exception:
+            continue
+        # Physical filtering
+        if (a > 0) and (g1 > 0) and (g2 > 0):
+            candidates.append((a, b, c1, c2, d1, d2))
+
+    if not candidates:
+        # Same tolerance as upstream: return all zeros to avoid caller crash
+        return np.zeros_like(qd)
+
+    if len(candidates) == 1:
+        a, b, c1, c2, d1, d2 = candidates[0]
+        return _Sq(qd, a, b, c1, c2, d1, d2)
+
+    # For multiple roots, use the average |g(r)| inside hard core as root selection criterion
+    def _fft_score(a, b, c1, c2, d1, d2):
+        # Only for scoring, not final output
+        q = np.linspace(0.02, 20.0, 400)
+        sq = _Sq(q, a, b, c1, c2, d1, d2)
+        n = len(sq); qmax = float(q[-1])
+        dr = 2*np.pi/qmax
+        p = np.arange(n, dtype=float)
+        temp = p * (sq - 1.0)
+        alpha = n * (qmax/n)**3 / (24*np.pi*np.pi*phi)
+        W = np.fft.fft(temp)
+        gr = np.zeros_like(p)
+        gr[1:] = 1.0 - alpha/p[1:] * np.imag(W)[1:]
+        r = p*dr
+        core = (r > 0.1) & (r < 0.9)
+        return float(np.mean(np.abs(gr[core])))
+
+    scores = [ _fft_score(*t) for t in candidates ]
+    best = int(np.argmin(scores))
+    a, b, c1, c2, d1, d2 = candidates[best]
+    return _Sq(qd, a, b, c1, c2, d1, d2)
